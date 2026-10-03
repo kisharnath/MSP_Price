@@ -34,7 +34,8 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(
 
 const kharifRecords: RecSeed[] = KHARIF_ROWS.map(
   ([serial, group, variety, category, msp, cost, margin, prev, base, incAbs, incBase, incBasePct, aliases]) => {
-    const cropId = slug(variety ? `${group}_${variety}` : group);
+    // Ids match the dictionary used by the PDF upload parser
+    const cropId = group === 'Cotton' ? (variety === 'Medium Staple' ? 'cotton_medium' : 'cotton_long') : slug(variety ? `${group}_${variety}` : group);
     const costMissing = cost === null;
     return {
       _id: `${KHARIF_DOC_ID}_${cropId.toUpperCase()}`,

@@ -247,7 +247,7 @@ export default function App() {
     const seenCrops = new Set<string>();
     const updated = candidateRecords.map(rec => {
       const errs: string[] = [];
-      const { cropId } = normalizeCropName(rec.crop_name);
+      const cropId = rec.crop_id || normalizeCropName(rec.crop_name).cropId;
 
       if (seenCrops.has(cropId)) {
         errs.push(`Duplicate crop detected: ${rec.crop_name}`);
@@ -279,18 +279,19 @@ export default function App() {
   // Common Save Execution Function: Persists locally AND calls MongoDB Atlas
   const executeSave = async (doc: DocumentMetadata, records: ExtractedCropRecord[]) => {
     // 1. Sanitize records
-    const sanitizedRecords = records.map((r, i) => {
-      let mspNum = typeof r.msp === 'number' ? r.msp : parseFloat(String(r.msp || 0));
-      if (isNaN(mspNum) || mspNum <= 0) {
-        mspNum = 2000 + (i * 500);
-      }
-      return {
-        ...r,
-        msp: mspNum,
-        validation_status: 'valid' as const,
-        validation_errors: []
-      };
-    });
+    const invalid = records.filter(r => typeof r.msp !== 'number' || isNaN(r.msp) || r.msp <= 0);
+    if (invalid.length > 0) {
+      setStatusMessage({
+        type: 'error',
+        text: `Cannot save: invalid MSP for ${invalid.map(r => r.crop_name).join(', ')}. Fix these rows first.`
+      });
+      return;
+    }
+    const sanitizedRecords = records.map(r => ({
+      ...r,
+      validation_status: 'valid' as const,
+      validation_errors: []
+    }));
 
     const season = doc.season || 'Rabi';
     const year = doc.marketing_year || '2027-28';
