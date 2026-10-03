@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
-import { connectToDatabase, getDatabaseName, getMongoUri } from './mongoClient';
+import { connectToDatabase, getDatabaseName, getMongoUri } from './mongoClient.js';
 
 dotenv.config();
 
