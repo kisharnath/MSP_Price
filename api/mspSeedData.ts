@@ -1,5 +1,5 @@
-import type { MspDocument, MspRecord } from './mspSchema';
-import { round2 } from './mspSchema';
+import type { MspDocument, MspRecord } from './mspSchema.js';
+import { round2 } from './mspSchema.js';
 
 type DocSeed = Omit<MspDocument, 'created_at' | 'updated_at'>;
 type RecSeed = Omit<MspRecord, 'created_at' | 'updated_at'>;
