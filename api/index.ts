@@ -1,6 +1,8 @@
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import { connectToDatabase, getDatabaseName, getMongoUri } from './mongoClient.js';
+import { upsertMspData, round2 } from './mspSchema.js';
+import { MSP_SEED } from './mspSeedData.js';
 
 dotenv.config();
 
@@ -139,65 +141,65 @@ app.post('/api/mongodb/save', async (req: Request, res: Response) => {
 
     const docId = metadata._id || `PIB_${(metadata.season || 'RABI').toUpperCase()}_${(metadata.marketing_year || '2027-28').replace(/[^a-zA-Z0-9]/g, '_')}`;
 
-    const docToUpsert = {
-      _id: docId,
-      title: metadata.title || `Cabinet approves MSP for ${metadata.season || 'Rabi'} Crops`,
-      source_name: metadata.source_name || 'Press Information Bureau',
-      source_url: metadata.source_url || '',
-      file_name: metadata.file_name || 'notification.pdf',
-      season: metadata.season || 'Rabi',
-      marketing_year: metadata.marketing_year || '2027-28',
-      published_at: publishedDate,
-      content_hash: metadata.content_hash || '',
-      verification_status: 'verified',
-      updated_at: now
-    };
+    const season = metadata.season || 'Rabi';
+    const marketingYear = metadata.marketing_year || '2027-28';
+    const num = (v: any) => (typeof v === 'number' && !isNaN(v) ? v : null);
 
-    // Upsert Document
-    await db.collection<any>('msp_documents').updateOne(
-      { _id: docId },
-      {
-        $set: docToUpsert,
-        $setOnInsert: { created_at: now }
-      },
-      { upsert: true }
-    );
-
-    // 2. Prepare & Upsert Records
-    const savedRecords = [];
-    for (const r of records) {
+    const recDocs = records.map((r: any) => {
       const cropId = (r.crop_id || 'unknown').toLowerCase();
-      const recId = `${docId}_${cropId.toUpperCase()}`;
-      const mspVal = typeof r.msp === 'number' ? r.msp : parseFloat(String(r.msp || 0));
-
-      const recToUpsert = {
-        _id: recId,
+      const msp = typeof r.msp === 'number' ? r.msp : parseFloat(String(r.msp || 0));
+      const prev = num(r.prev_year_msp);
+      const inc = num(r.increase_abs);
+      return {
+        _id: `${docId}_${cropId.toUpperCase()}`,
         document_id: docId,
+        serial_no: num(r.serial_no),
         crop_id: cropId,
         crop_name: r.crop_name,
+        crop_group: r.crop_group ?? null,
+        variety: r.variety ?? null,
+        category: r.category ?? null,
         crop_aliases: Array.isArray(r.crop_aliases) ? r.crop_aliases : [],
-        season: metadata.season || r.season || 'Rabi',
-        marketing_year: metadata.marketing_year || r.marketing_year || '2027-28',
-        msp: mspVal,
+        season,
+        marketing_year: marketingYear,
         unit: r.unit || 'INR/quintal',
-        cost_of_production: r.cost_of_production !== undefined ? r.cost_of_production : null,
-        margin_percent: r.margin_percent !== undefined ? r.margin_percent : null,
+        msp,
+        cost_of_production: num(r.cost_of_production),
+        margin_percent: num(r.margin_percent),
+        prev_year_label: r.prev_year_label ?? null,
+        prev_year_msp: prev,
+        increase_abs: inc,
+        increase_pct: prev && inc !== null ? round2((inc / prev) * 100) : null,
+        base_year_label: r.base_year_label ?? null,
+        base_year_msp: num(r.base_year_msp),
+        increase_over_base_abs: num(r.increase_over_base_abs),
+        increase_over_base_pct: num(r.increase_over_base_pct),
+        notes: Array.isArray(r.notes) ? r.notes : [],
         published_at: publishedDate,
-        validation_status: 'valid',
-        updated_at: now
+        validation_status: 'valid' as const,
       };
+    });
 
-      await db.collection<any>('msp_records').updateOne(
-        { _id: recId },
-        {
-          $set: recToUpsert,
-          $setOnInsert: { created_at: now }
-        },
-        { upsert: true }
-      );
-
-      savedRecords.push(recId);
-    }
+    await upsertMspData(
+      db,
+      {
+        _id: docId,
+        title: metadata.title || `Cabinet approves MSP for ${season} Crops`,
+        source_name: metadata.source_name || 'Press Information Bureau',
+        source_url: metadata.source_url || '',
+        press_release_id: metadata.press_release_id ?? null,
+        file_name: metadata.file_name || 'notification.pdf',
+        season,
+        marketing_year: marketingYear,
+        published_at: publishedDate,
+        content_hash: metadata.content_hash || '',
+        verification_status: 'verified',
+        crop_count: recDocs.length,
+        highlights: metadata.highlights || {},
+      },
+      recDocs
+    );
+    const savedRecords = recDocs.map((r: any) => r._id);
 
     return res.json({
       success: true,
@@ -221,6 +223,24 @@ app.post('/api/mongodb/save', async (req: Request, res: Response) => {
       error: err.message || 'Failed to save to MongoDB',
       hint
     });
+  }
+});
+
+// 3b. Seed the bundled Kharif 2026-27 and Rabi 2027-28 releases
+app.post('/api/mongodb/seed', async (req: Request, res: Response) => {
+  const { uri, database } = req.body || {};
+  const targetUri = uri || getMongoUri();
+  if (!targetUri) {
+    return res.status(400).json({ success: false, error: 'MONGODB_URI is not configured.' });
+  }
+  try {
+    const client = await connectToDatabase(targetUri);
+    const db = client.db(database || getDatabaseName());
+    const results = [];
+    for (const { doc, records } of MSP_SEED) results.push(await upsertMspData(db, doc, records));
+    return res.json({ success: true, results });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 

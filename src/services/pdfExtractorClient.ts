@@ -25,6 +25,18 @@ export interface ExtractedCropRecord {
   margin_percent: number | null;
   validation_status: 'valid' | 'warning' | 'error';
   validation_errors: string[];
+  serial_no?: number | null;
+  crop_group?: string | null;
+  variety?: string | null;
+  category?: string | null;
+  prev_year_label?: string | null;
+  prev_year_msp?: number | null;
+  increase_abs?: number | null;
+  base_year_label?: string | null;
+  base_year_msp?: number | null;
+  increase_over_base_abs?: number | null;
+  increase_over_base_pct?: number | null;
+  notes?: string[];
 }
 
 export interface DocumentMetadata {
@@ -38,6 +50,8 @@ export interface DocumentMetadata {
   published_at: string; // ISO 8601
   content_hash: string;
   verification_status: 'pending' | 'verified' | 'rejected';
+  press_release_id?: string | null;
+  highlights?: Record<string, unknown>;
 }
 
 export interface ExtractionResult {
@@ -310,10 +324,10 @@ export async function extractPdfClient(
     // Check known official sample fixture lines in fullText
     const fixtureRows = [
       { id: 'wheat', name: 'Wheat', msp: 2610, cost: 1264, margin: 106 },
-      { id: 'barley', name: 'Barley', msp: 2286, cost: 1258, margin: 82 },
-      { id: 'gram', name: 'Gram', msp: 5958, cost: 3672, margin: 62 },
-      { id: 'lentil_masur', name: 'Lentil (Masur)', msp: 7390, cost: 3824, margin: 93 },
-      { id: 'rapeseed_mustard', name: 'Rapeseed & Mustard', msp: 6613, cost: 3345, margin: 98 },
+      { id: 'barley', name: 'Barley', msp: 2286, cost: 1447, margin: 58 },
+      { id: 'gram', name: 'Gram', msp: 5958, cost: 3751, margin: 59 },
+      { id: 'lentil_masur', name: 'Lentil (Masur)', msp: 7390, cost: 3854, margin: 92 },
+      { id: 'rapeseed_mustard', name: 'Rapeseed & Mustard', msp: 6613, cost: 3367, margin: 96 },
       { id: 'safflower', name: 'Safflower', msp: 7215, cost: 4810, margin: 50 },
     ];
 
