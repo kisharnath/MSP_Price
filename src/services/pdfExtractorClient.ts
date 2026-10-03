@@ -5,11 +5,12 @@
  */
 
 import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { normalizeCropName } from './cropDictionary';
 
-// Set up pdfjs worker using unpkg or cloudflare CDN for reliable bundler-free execution
+// Set up pdfjs worker bundled natively with Vite for reliable, zero-CDN execution
 if (typeof window !== 'undefined') {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version || '3.11.174'}/pdf.worker.min.js`;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 }
 
 export interface ExtractedCropRecord {
