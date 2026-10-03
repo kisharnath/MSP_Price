@@ -19,7 +19,11 @@ import {
   Info,
   Check,
   ArrowRight,
-  Save
+  Save,
+  Server,
+  KeyRound,
+  RefreshCw,
+  HelpCircle
 } from 'lucide-react';
 import {
   extractPdfClient,
@@ -29,15 +33,36 @@ import {
 } from './services/pdfExtractorClient';
 import { StorageService } from './services/storageService';
 import { normalizeCropName } from './services/cropDictionary';
+import { MongoApiClient, MongoStatusResponse } from './services/mongoApiClient';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'ingestion' | 'database' | 'chatbot' | 'history' | 'export'>('ingestion');
+  const [activeTab, setActiveTab] = useState<'ingestion' | 'database' | 'chatbot' | 'history' | 'mongodb' | 'export'>('ingestion');
+
+  // MongoDB Atlas Live Status
+  const [mongoStatus, setMongoStatus] = useState<MongoStatusResponse>({
+    configured: false,
+    connected: false,
+    maskedUri: null,
+    database: 'agriculture_db'
+  });
+  const [isCheckingMongo, setIsCheckingMongo] = useState(false);
+
+  // MongoDB Settings inputs
+  const [inputMongoUri, setInputMongoUri] = useState('');
+  const [inputMongoDb, setInputMongoDb] = useState('agriculture_db');
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string; hint?: string } | null>(null);
+  const [isTestingMongo, setIsTestingMongo] = useState(false);
 
   // Ingestion State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [sourceUrl, setSourceUrl] = useState('https://www.pib.gov.in/PressReleaseDetail.aspx?PRID=2316956&reg=48&lang=1');
   const [isExtracting, setIsExtracting] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<{ type: 'info' | 'success' | 'warning' | 'error'; text: string } | null>({
+  const [statusMessage, setStatusMessage] = useState<{
+    type: 'info' | 'success' | 'warning' | 'error';
+    text: string;
+    details?: string;
+    hint?: string;
+  } | null>({
     type: 'info',
     text: 'Ready for PDF upload. Select an official notification PDF or click "Load Official Sample PDF (Rabi 2027-28)".'
   });
@@ -66,12 +91,15 @@ export default function App() {
     isOpen: boolean;
     docId: string;
     count: number;
-    message: string;
+    atlasStatus: 'saved' | 'failed' | 'not_configured';
+    atlasMessage: string;
+    atlasHint?: string;
   }>({
     isOpen: false,
     docId: '',
     count: 0,
-    message: ''
+    atlasStatus: 'not_configured',
+    atlasMessage: ''
   });
 
   // Database Tab State
@@ -97,9 +125,36 @@ export default function App() {
     setHistoryRecords(StorageService.getHistoricalRecords(historyCrop));
   };
 
+  // Check MongoDB Atlas status from backend
+  const checkMongoStatus = async () => {
+    setIsCheckingMongo(true);
+    const status = await MongoApiClient.checkStatus();
+    setMongoStatus(status);
+    setIsCheckingMongo(false);
+  };
+
+  useEffect(() => {
+    refreshDb();
+    checkMongoStatus();
+    const saved = MongoApiClient.getSavedCustomConfig();
+    if (saved.uri) setInputMongoUri(saved.uri);
+    if (saved.database) setInputMongoDb(saved.database);
+  }, []);
+
   useEffect(() => {
     refreshDb();
   }, [filterCrop, filterSeason, filterYear, historyCrop]);
+
+  // Handle Testing Custom MongoDB Atlas Connection
+  const handleTestMongo = async () => {
+    setIsTestingMongo(true);
+    setTestResult(null);
+    MongoApiClient.setCustomConfig(inputMongoUri, inputMongoDb);
+    const res = await MongoApiClient.testConnection(inputMongoUri, inputMongoDb);
+    setTestResult(res);
+    setIsTestingMongo(false);
+    checkMongoStatus();
+  };
 
   // Load Official Sample PDF
   const handleLoadSamplePdf = async (autoSave: boolean = false) => {
@@ -124,18 +179,7 @@ export default function App() {
       setValidationLogs(result.logs);
 
       if (autoSave) {
-        const res = StorageService.saveApprovedDocument(result.metadata, result.records);
-        refreshDb();
-        setSaveSuccessModal({
-          isOpen: true,
-          docId: result.metadata._id,
-          count: res.count,
-          message: res.message
-        });
-        setStatusMessage({
-          type: 'success',
-          text: `🎉 Ingested and Saved! Document '${result.metadata._id}' with ${res.count} verified crop records stored in MongoDB.`
-        });
+        await executeSave(result.metadata, result.records);
       } else {
         const dup = StorageService.checkDuplicate(result.metadata.content_hash);
         if (dup) {
@@ -232,23 +276,13 @@ export default function App() {
     }
   };
 
-  // Approve and Save (Guaranteed action - never dead or silently disabled)
-  const handleApproveAndSave = async () => {
-    // If no records yet, auto-extract sample or prompt
-    if (candidateRecords.length === 0) {
-      setStatusMessage({
-        type: 'info',
-        text: 'No PDF extracted yet. Automatically loading and saving the official Rabi 2027-28 notification PDF...'
-      });
-      await handleLoadSamplePdf(true);
-      return;
-    }
-
-    // Auto-sanitize records: ensure valid numbers and fill defaults
-    const sanitizedRecords = candidateRecords.map((r, i) => {
+  // Common Save Execution Function: Persists locally AND calls MongoDB Atlas
+  const executeSave = async (doc: DocumentMetadata, records: ExtractedCropRecord[]) => {
+    // 1. Sanitize records
+    const sanitizedRecords = records.map((r, i) => {
       let mspNum = typeof r.msp === 'number' ? r.msp : parseFloat(String(r.msp || 0));
       if (isNaN(mspNum) || mspNum <= 0) {
-        mspNum = 2000 + (i * 500); // reasonable fallback
+        mspNum = 2000 + (i * 500);
       }
       return {
         ...r,
@@ -258,44 +292,81 @@ export default function App() {
       };
     });
 
-    // Auto-fill metadata if blank
-    const season = metadata.season || 'Rabi';
-    const year = metadata.marketing_year || '2027-28';
-    const docId = metadata._id && metadata._id.trim()
-      ? metadata._id.trim()
+    const season = doc.season || 'Rabi';
+    const year = doc.marketing_year || '2027-28';
+    const docId = doc._id && doc._id.trim()
+      ? doc._id.trim()
       : `PIB_${season.toUpperCase()}_${year.replace(/[^a-zA-Z0-9]/g, '_')}`;
 
     const docToSave: DocumentMetadata = {
-      ...metadata,
+      ...doc,
       _id: docId,
       season,
       marketing_year: year,
-      published_at: metadata.published_at || new Date().toISOString(),
-      title: metadata.title || `Cabinet approves MSP for ${season} Crops for Marketing Season ${year}`,
+      published_at: doc.published_at || new Date().toISOString(),
+      title: doc.title || `Cabinet approves MSP for ${season} Crops for Marketing Season ${year}`,
       verification_status: 'verified'
     };
 
-    const res = StorageService.saveApprovedDocument(docToSave, sanitizedRecords);
-    if (res.success) {
-      setMetadata(docToSave);
-      setCandidateRecords(sanitizedRecords);
-      refreshDb();
+    // 2. Persist locally first
+    const localRes = StorageService.saveApprovedDocument(docToSave, sanitizedRecords);
+    setMetadata(docToSave);
+    setCandidateRecords(sanitizedRecords);
+    refreshDb();
 
-      // Show success modal
+    // 3. Persist to MongoDB Atlas via backend API
+    const atlasRes = await MongoApiClient.saveToAtlas(docToSave, sanitizedRecords);
+
+    if (atlasRes.success) {
       setSaveSuccessModal({
         isOpen: true,
         docId: docToSave._id,
-        count: res.count,
-        message: res.message
+        count: sanitizedRecords.length,
+        atlasStatus: 'saved',
+        atlasMessage: atlasRes.message
       });
 
       setStatusMessage({
         type: 'success',
-        text: `🎉 Approved & Saved! Document '${docToSave._id}' marked verified. ${res.count} crops persisted in MongoDB collection.`
+        text: `🎉 Approved & Saved! Document '${docToSave._id}' (${sanitizedRecords.length} crops) successfully written to MongoDB Atlas!`,
+        details: `Database: ${atlasRes.database || 'agriculture_db'} | Collections: msp_documents, msp_records`
       });
+      checkMongoStatus();
     } else {
-      setStatusMessage({ type: 'error', text: `Failed to save: ${res.message}` });
+      // Atlas failed or not configured
+      const isNotConfigured = atlasRes.message.includes('not configured');
+      setSaveSuccessModal({
+        isOpen: true,
+        docId: docToSave._id,
+        count: sanitizedRecords.length,
+        atlasStatus: isNotConfigured ? 'not_configured' : 'failed',
+        atlasMessage: atlasRes.message,
+        atlasHint: atlasRes.hint
+      });
+
+      setStatusMessage({
+        type: isNotConfigured ? 'warning' : 'error',
+        text: isNotConfigured
+          ? `⚠️ Saved locally, but MongoDB Atlas is NOT configured! No live cluster received this data.`
+          : `⚠️ Saved locally, but FAILED to upload to MongoDB Atlas!`,
+        details: atlasRes.message,
+        hint: atlasRes.hint || 'Check MONGODB_URI in your .env or configure in "MongoDB Atlas Settings" tab.'
+      });
     }
+  };
+
+  // Approve and Save Handler
+  const handleApproveAndSave = async () => {
+    if (candidateRecords.length === 0) {
+      setStatusMessage({
+        type: 'info',
+        text: 'No PDF extracted yet. Automatically loading and saving the official Rabi 2027-28 notification PDF...'
+      });
+      await handleLoadSamplePdf(true);
+      return;
+    }
+
+    await executeSave(metadata, candidateRecords);
   };
 
   // Reject Document
@@ -386,14 +457,37 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center space-x-3 text-xs">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {/* Live MongoDB Atlas Status Indicator */}
+            <button
+              onClick={() => setActiveTab('mongodb')}
+              className={`flex items-center px-3 py-1.5 rounded-lg border transition-all cursor-pointer ${
+                mongoStatus.connected
+                  ? 'bg-emerald-950/80 border-emerald-500/40 text-emerald-300 hover:bg-emerald-900'
+                  : mongoStatus.configured
+                  ? 'bg-rose-950/80 border-rose-500/40 text-rose-300 hover:bg-rose-900'
+                  : 'bg-amber-950/80 border-amber-500/40 text-amber-300 hover:bg-amber-900'
+              }`}
+              title="Click to manage MongoDB Atlas settings and connection"
+            >
+              <Database className="w-3.5 h-3.5 mr-1.5" />
+              <span>
+                Atlas:{' '}
+                {isCheckingMongo ? (
+                  <span className="text-slate-400">Checking...</span>
+                ) : mongoStatus.connected ? (
+                  <strong className="text-emerald-400">Connected ({mongoStatus.database})</strong>
+                ) : mongoStatus.configured ? (
+                  <strong className="text-rose-400">Connection Failed ⚠️</strong>
+                ) : (
+                  <strong className="text-amber-400">Not Configured (Click to set)</strong>
+                )}
+              </span>
+            </button>
+
             <div className="flex items-center px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700/60 text-slate-300">
               <Shield className="w-3.5 h-3.5 text-emerald-400 mr-1.5" />
-              <span>Engine: <strong className="text-emerald-300">pdfjs-dist (Vercel Native)</strong></span>
-            </div>
-            <div className="flex items-center px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700/60 text-slate-300">
-              <Database className="w-3.5 h-3.5 text-blue-400 mr-1.5" />
-              <span>MongoDB Collections: <strong className="text-blue-300">{documentsList.length} Docs / {recordsList.length} Crops</strong></span>
+              <span>Scraper: <strong className="text-emerald-300">pdfjs-dist (Vercel Native)</strong></span>
             </div>
           </div>
         </div>
@@ -445,6 +539,17 @@ export default function App() {
             <span>4. Historical Seasons</span>
           </button>
           <button
+            onClick={() => setActiveTab('mongodb')}
+            className={`pb-2.5 px-4 text-sm font-medium transition-colors flex items-center space-x-2 border-b-2 whitespace-nowrap ${
+              activeTab === 'mongodb'
+                ? 'border-emerald-500 text-emerald-400'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Server className="w-4 h-4" />
+            <span>5. MongoDB Atlas Settings & Sync</span>
+          </button>
+          <button
             onClick={() => setActiveTab('export')}
             className={`pb-2.5 px-4 text-sm font-medium transition-colors flex items-center space-x-2 border-b-2 whitespace-nowrap ${
               activeTab === 'export'
@@ -453,17 +558,17 @@ export default function App() {
             }`}
           >
             <Download className="w-4 h-4" />
-            <span>5. Export for MongoDB Atlas</span>
+            <span>6. JSON Exporter</span>
           </button>
         </div>
       </header>
 
       {/* Main Body */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
-        {/* Status Notification Banner */}
+        {/* Status Notification Banner with Detailed Error Guidance */}
         {statusMessage && (
           <div
-            className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all ${
+            className={`p-4 rounded-xl border flex flex-col gap-2 transition-all ${
               statusMessage.type === 'success'
                 ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
                 : statusMessage.type === 'error'
@@ -473,23 +578,45 @@ export default function App() {
                 : 'bg-slate-900 border-slate-800 text-slate-300'
             }`}
           >
-            <div className="flex items-start space-x-3">
-              {statusMessage.type === 'success' && <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />}
-              {statusMessage.type === 'error' && <XCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />}
-              {statusMessage.type === 'warning' && <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />}
-              {statusMessage.type === 'info' && <Info className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />}
-              <div className="text-sm font-medium leading-relaxed whitespace-pre-line">{statusMessage.text}</div>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start space-x-3">
+                {statusMessage.type === 'success' && <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />}
+                {statusMessage.type === 'error' && <XCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />}
+                {statusMessage.type === 'warning' && <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />}
+                {statusMessage.type === 'info' && <Info className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />}
+                <div>
+                  <div className="text-sm font-semibold leading-relaxed">{statusMessage.text}</div>
+                  {statusMessage.details && (
+                    <div className="text-xs font-mono opacity-80 mt-0.5">{statusMessage.details}</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-2 shrink-0">
+                <button
+                  onClick={handleApproveAndSave}
+                  className="px-4 py-2 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-all shadow-md flex items-center space-x-1.5 cursor-pointer hover:scale-105 active:scale-95"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>Approve & Save to Database</span>
+                </button>
+              </div>
             </div>
 
-            <div className="flex items-center space-x-2 shrink-0">
-              <button
-                onClick={handleApproveAndSave}
-                className="px-4 py-2 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-all shadow-md flex items-center space-x-1.5 cursor-pointer hover:scale-105 active:scale-95"
-              >
-                <Save className="w-4 h-4" />
-                <span>Approve & Save to Database</span>
-              </button>
-            </div>
+            {statusMessage.hint && (
+              <div className="mt-1 pt-2 border-t border-slate-700/50 text-xs flex items-center justify-between text-amber-300/90">
+                <div className="flex items-center space-x-1.5">
+                  <HelpCircle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span><strong>Troubleshooting Hint:</strong> {statusMessage.hint}</span>
+                </div>
+                <button
+                  onClick={() => setActiveTab('mongodb')}
+                  className="underline hover:text-white ml-2 shrink-0 cursor-pointer font-semibold"
+                >
+                  Open MongoDB Settings &rarr;
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -782,12 +909,22 @@ export default function App() {
                     <span>Section D: Review & Approval Decision</span>
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Clicking <strong className="text-emerald-300">Approve & Save to Database</strong> writes the document to <code className="text-blue-300">msp_documents</code> and persists all crop records into <code className="text-emerald-300">msp_records</code> with verified status.
+                    Clicking <strong className="text-emerald-300">Approve & Save to Database</strong> will write the document to <code className="text-blue-300">msp_documents</code> and persists all crop records into <code className="text-emerald-300">msp_records</code> with verified status.
                   </p>
                 </div>
-                <span className="px-2.5 py-1 text-xs font-semibold rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-                  Ready to Persist
-                </span>
+                <div className="flex items-center space-x-2">
+                  {mongoStatus.connected ? (
+                    <span className="px-2.5 py-1 text-xs font-semibold rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 flex items-center space-x-1">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                      <span>Atlas Sync: Active</span>
+                    </span>
+                  ) : (
+                    <span className="px-2.5 py-1 text-xs font-semibold rounded bg-amber-500/10 text-amber-300 border border-amber-500/30 flex items-center space-x-1">
+                      <span className="w-2 h-2 rounded-full bg-amber-400"></span>
+                      <span>Local Storage (Atlas Not Connected)</span>
+                    </span>
+                  )}
+                </div>
               </div>
 
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 pt-1">
@@ -1085,7 +1222,172 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 5: Export for MongoDB Atlas */}
+        {/* TAB 5: MongoDB Atlas Settings & Sync */}
+        {activeTab === 'mongodb' && (
+          <div className="max-w-4xl mx-auto space-y-6">
+            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center space-x-2">
+                    <Database className="w-5 h-5 text-emerald-400" />
+                    <span>MongoDB Atlas Live Cluster Configuration</span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Connect your MongoDB Atlas cluster so approved PDF notifications are written directly to your cloud collections.
+                  </p>
+                </div>
+                <button
+                  onClick={checkMongoStatus}
+                  disabled={isCheckingMongo}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors flex items-center space-x-1.5 self-start cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isCheckingMongo ? 'animate-spin' : ''}`} />
+                  <span>Refresh Status</span>
+                </button>
+              </div>
+
+              {/* Status Card */}
+              <div
+                className={`p-4 rounded-xl border flex items-start space-x-3 ${
+                  mongoStatus.connected
+                    ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
+                    : mongoStatus.configured
+                    ? 'bg-rose-950/40 border-rose-500/40 text-rose-300'
+                    : 'bg-amber-950/40 border-amber-500/40 text-amber-300'
+                }`}
+              >
+                {mongoStatus.connected ? (
+                  <CheckCircle2 className="w-6 h-6 text-emerald-400 shrink-0 mt-0.5" />
+                ) : mongoStatus.configured ? (
+                  <XCircle className="w-6 h-6 text-rose-400 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertTriangle className="w-6 h-6 text-amber-400 shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-1 text-xs">
+                  <div className="text-sm font-bold">
+                    {mongoStatus.connected
+                      ? 'Connected to MongoDB Atlas Cluster!'
+                      : mongoStatus.configured
+                      ? 'Connection to MongoDB Atlas Failed'
+                      : 'MongoDB Atlas URI Not Configured'}
+                  </div>
+                  {mongoStatus.maskedUri && (
+                    <div className="font-mono text-[11px] text-slate-300">
+                      URI: {mongoStatus.maskedUri} | Database: {mongoStatus.database}
+                    </div>
+                  )}
+                  {mongoStatus.error && (
+                    <div className="font-mono text-rose-300 mt-1 bg-rose-950/60 p-2 rounded border border-rose-500/30">
+                      Error: {mongoStatus.error}
+                    </div>
+                  )}
+                  {mongoStatus.hint && (
+                    <div className="text-slate-200 mt-1 font-sans">
+                      <strong>Guidance:</strong> {mongoStatus.hint}
+                    </div>
+                  )}
+                  {mongoStatus.stats && (
+                    <div className="text-emerald-300 pt-1 flex items-center space-x-3">
+                      <span>Documents in Atlas: <strong>{mongoStatus.stats.documents}</strong></span>
+                      <span>Crop Records in Atlas: <strong>{mongoStatus.stats.records}</strong></span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Configure Connection Form */}
+              <div className="space-y-4 bg-slate-950/60 p-5 rounded-xl border border-slate-800">
+                <h4 className="text-sm font-semibold text-white flex items-center space-x-2">
+                  <KeyRound className="w-4 h-4 text-blue-400" />
+                  <span>Enter or Override MongoDB Atlas Connection String</span>
+                </h4>
+                <p className="text-xs text-slate-400">
+                  You can set <code className="text-emerald-300">MONGODB_URI</code> in your <code className="text-blue-300">.env</code> file (or Vercel Environment Variables), or paste it here:
+                </p>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      MongoDB Connection URI (SRV format)
+                    </label>
+                    <input
+                      type="password"
+                      value={inputMongoUri}
+                      onChange={e => setInputMongoUri(e.target.value)}
+                      placeholder="mongodb+srv://<username>:<password>@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority"
+                      className="w-full text-xs font-mono bg-slate-900 border border-slate-700 rounded-lg px-3 py-2.5 text-slate-100 focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Database Name
+                    </label>
+                    <input
+                      type="text"
+                      value={inputMongoDb}
+                      onChange={e => setInputMongoDb(e.target.value)}
+                      placeholder="agriculture_db"
+                      className="w-full sm:w-64 text-xs font-mono bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+
+                  <div className="pt-2 flex flex-wrap gap-2">
+                    <button
+                      onClick={handleTestMongo}
+                      disabled={isTestingMongo || !inputMongoUri}
+                      className="px-4 py-2 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors flex items-center space-x-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isTestingMongo ? 'animate-spin' : ''}`} />
+                      <span>Test & Save Connection</span>
+                    </button>
+                  </div>
+                </div>
+
+                {testResult && (
+                  <div
+                    className={`mt-4 p-3 rounded-lg border text-xs ${
+                      testResult.success
+                        ? 'bg-emerald-950/60 border-emerald-500/40 text-emerald-300'
+                        : 'bg-rose-950/60 border-rose-500/40 text-rose-300'
+                    }`}
+                  >
+                    <div className="font-semibold">{testResult.message}</div>
+                    {testResult.hint && (
+                      <div className="mt-1 text-slate-300 font-sans">
+                        💡 <strong>Hint:</strong> {testResult.hint}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Troubleshooting Guide Box */}
+              <div className="bg-slate-950/40 p-4 rounded-xl border border-slate-800/80 space-y-2 text-xs text-slate-400">
+                <h5 className="font-semibold text-slate-200 flex items-center space-x-1.5">
+                  <Info className="w-4 h-4 text-blue-400" />
+                  <span>Important MongoDB Atlas Setup Checklist:</span>
+                </h5>
+                <ul className="list-disc list-inside space-y-1 pl-1 text-[11px] leading-relaxed">
+                  <li>
+                    <strong>Network Access (IP Whitelist):</strong> On your MongoDB Atlas dashboard, navigate to <em>Network Access</em> &rarr; <em>IP Access List</em> &rarr; Add <code>0.0.0.0/0</code> (Allow Access from Anywhere) so Vercel and your web browser can connect.
+                  </li>
+                  <li>
+                    <strong>Database User:</strong> Ensure the database user has <em>Read and write to any database</em> role.
+                  </li>
+                  <li>
+                    <strong>Password Encoding:</strong> If your MongoDB password has special characters like <code>@</code>, <code>#</code>, <code>:</code>, or <code>%</code>, URL-encode them (e.g. <code>@</code> becomes <code>%40</code>).
+                  </li>
+                  <li>
+                    <strong>Vercel Deployment:</strong> Add <code>MONGODB_URI</code> to your Project Settings &rarr; <em>Environment Variables</em> in the Vercel Dashboard.
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 6: Export for MongoDB Atlas */}
         {activeTab === 'export' && (
           <div className="max-w-4xl mx-auto space-y-6">
             <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 space-y-4">
@@ -1119,7 +1421,7 @@ export default function App() {
         )}
       </main>
 
-      {/* Confirmation Modal when Saved to Database */}
+      {/* Confirmation Modal when Saved */}
       {saveSuccessModal.isOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-emerald-500/40 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl animate-in fade-in zoom-in duration-200">
@@ -1128,7 +1430,7 @@ export default function App() {
                 <CheckCircle2 className="w-8 h-8" />
               </div>
               <div>
-                <h3 className="text-lg font-bold text-white">Successfully Saved to MongoDB!</h3>
+                <h3 className="text-lg font-bold text-white">Document Processed & Saved!</h3>
                 <p className="text-xs text-slate-400">Document and crop records persisted with verified status.</p>
               </div>
             </div>
@@ -1139,20 +1441,52 @@ export default function App() {
                 <span className="font-mono text-emerald-300 font-semibold">{saveSuccessModal.docId}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Records Saved:</span>
-                <span className="font-semibold text-white">{saveSuccessModal.count} crops (Wheat, Barley, Gram, Masur...)</span>
+                <span className="text-slate-400">Records Processed:</span>
+                <span className="font-semibold text-white">{saveSuccessModal.count} crops</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Verification Status:</span>
-                <span className="text-emerald-400 font-bold uppercase">VERIFIED</span>
+                <span className="text-slate-400">Local Database:</span>
+                <span className="text-emerald-400 font-bold uppercase">SAVED (VERIFIED)</span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-slate-400">Historical Integrity:</span>
-                <span className="text-blue-300 font-medium">RMS 2026-27 preserved</span>
+
+              {/* MongoDB Atlas Status Row */}
+              <div className="flex justify-between pt-1 border-t border-slate-800">
+                <span className="text-slate-400">MongoDB Atlas:</span>
+                {saveSuccessModal.atlasStatus === 'saved' ? (
+                  <span className="text-emerald-400 font-bold flex items-center space-x-1">
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Live Synced to Atlas</span>
+                  </span>
+                ) : saveSuccessModal.atlasStatus === 'failed' ? (
+                  <span className="text-rose-400 font-bold">Upload Failed ⚠️</span>
+                ) : (
+                  <span className="text-amber-400 font-medium">Not Configured</span>
+                )}
               </div>
             </div>
 
+            {saveSuccessModal.atlasStatus !== 'saved' && (
+              <div className="p-2.5 bg-amber-950/40 border border-amber-500/30 rounded-lg text-[11px] text-amber-200 space-y-1">
+                <div><strong>Note:</strong> {saveSuccessModal.atlasMessage}</div>
+                {saveSuccessModal.atlasHint && (
+                  <div className="text-slate-300 font-sans">{saveSuccessModal.atlasHint}</div>
+                )}
+              </div>
+            )}
+
             <div className="flex flex-col gap-2 pt-2">
+              {saveSuccessModal.atlasStatus !== 'saved' && (
+                <button
+                  onClick={() => {
+                    setSaveSuccessModal({ ...saveSuccessModal, isOpen: false });
+                    setActiveTab('mongodb');
+                  }}
+                  className="w-full py-2.5 px-4 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold transition-colors flex items-center justify-center space-x-2 cursor-pointer shadow"
+                >
+                  <Server className="w-4 h-4" />
+                  <span>Configure MongoDB Atlas Connection</span>
+                </button>
+              )}
               <button
                 onClick={() => {
                   setSaveSuccessModal({ ...saveSuccessModal, isOpen: false });
@@ -1162,16 +1496,6 @@ export default function App() {
               >
                 <span>View in Database Explorer</span>
                 <ArrowRight className="w-4 h-4" />
-              </button>
-              <button
-                onClick={() => {
-                  setSaveSuccessModal({ ...saveSuccessModal, isOpen: false });
-                  setActiveTab('chatbot');
-                }}
-                className="w-full py-2 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition-colors flex items-center justify-center space-x-1.5 cursor-pointer"
-              >
-                <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Test Chatbot Query Simulator</span>
               </button>
               <button
                 onClick={() => setSaveSuccessModal({ ...saveSuccessModal, isOpen: false })}
