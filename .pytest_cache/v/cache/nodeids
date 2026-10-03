@@ -1,0 +1,14 @@
+[
+  "msp-ingestion/tests/test_database.py::test_approval_and_rejection_workflows",
+  "msp-ingestion/tests/test_database.py::test_duplicate_pdf_detection",
+  "msp-ingestion/tests/test_database.py::test_historical_preservation_and_latest_msp",
+  "msp-ingestion/tests/test_database.py::test_unverified_records_never_returned",
+  "msp-ingestion/tests/test_parser.py::test_duplicate_crop_prevention_in_same_document",
+  "msp-ingestion/tests/test_parser.py::test_identify_columns_ignores_previous_season",
+  "msp-ingestion/tests/test_parser.py::test_missing_and_invalid_msp_validation",
+  "msp-ingestion/tests/test_parser.py::test_normalize_crop_name",
+  "msp-ingestion/tests/test_parser.py::test_parse_numeric",
+  "msp-ingestion/tests/test_parser.py::test_parse_publication_datetime",
+  "msp-ingestion/tests/test_parser.py::test_rabi_2027_28_sample_pdf_extraction",
+  "msp-ingestion/tests/test_parser.py::test_scanned_pdf_error"
+]

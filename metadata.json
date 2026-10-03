@@ -1,0 +1,6 @@
+{
+  "name": "MSP PDF Ingestion & MongoDB Management",
+  "description": "Extract, validate, and manage Minimum Support Price (MSP) data from official Government of India PDF notifications into MongoDB with Gradio and pdfplumber.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
