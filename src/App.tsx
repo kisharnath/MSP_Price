@@ -407,7 +407,18 @@ export default function App() {
             {statusMessage.type === 'error' && <XCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />}
             {statusMessage.type === 'warning' && <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />}
             {statusMessage.type === 'info' && <Info className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />}
-            <div className="text-sm font-medium leading-relaxed whitespace-pre-line">{statusMessage.text}</div>
+            <div className="flex-1 text-sm font-medium leading-relaxed whitespace-pre-line">{statusMessage.text}</div>
+            {candidateRecords.length > 0 && (
+              <div className="flex items-center space-x-2 shrink-0">
+                <button
+                  onClick={handleApproveAndSave}
+                  className="px-3.5 py-1.5 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-all shadow-md flex items-center space-x-1.5"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Approve & Save to Database</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
 
