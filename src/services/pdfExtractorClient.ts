@@ -6,7 +6,7 @@
 
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { normalizeCropName } from './cropDictionary';
+import { parseMspTable } from './mspTableParser';
 
 // Set up pdfjs worker bundled natively with Vite for reliable, zero-CDN execution
 if (typeof window !== 'undefined') {
@@ -205,162 +205,19 @@ export async function extractPdfClient(
   const cleanYearSlug = marketingYear.replace('-', '_');
   const docId = `PIB_${cleanSeasonSlug}_${cleanYearSlug}`;
 
-  // Cluster text items by line (page, y threshold ~6 points)
-  interface LineGroup {
-    page: number;
-    y: number;
-    items: TextItemPos[];
-  }
-  const lines: LineGroup[] = [];
-  allItems.sort((a, b) => {
-    if (a.page !== b.page) return a.page - b.page;
-    return b.y - a.y; // top to bottom
-  });
+  const candidateRecords: ExtractedCropRecord[] = parseMspTable(allItems, season, marketingYear);
+  const logs: { status: 'valid' | 'warning' | 'error'; crop_name: string; errors: string[] }[] =
+    candidateRecords.map(r => ({ status: r.validation_status, crop_name: r.crop_name, errors: r.validation_errors }));
 
-  for (const item of allItems) {
-    let line = lines.find(l => l.page === item.page && Math.abs(l.y - item.y) < 6);
-    if (!line) {
-      line = { page: item.page, y: item.y, items: [] };
-      lines.push(line);
-    }
-    line.items.push(item);
-  }
-
-  // Sort items within each line left to right
-  for (const line of lines) {
-    line.items.sort((a, b) => a.x - b.x);
-  }
-
-  // Parse candidate crop records
-  // Standard target crops for Indian MSP
-  const standardCrops = [
-    { id: 'wheat', name: 'Wheat', rx: /\bwheat\b|\bgehu\b/i },
-    { id: 'barley', name: 'Barley', rx: /\bbarley\b|\bjau\b/i },
-    { id: 'gram', name: 'Gram', rx: /\bgram\b|\bchana\b/i },
-    { id: 'lentil_masur', name: 'Lentil (Masur)', rx: /lentil|masur|masoor/i },
-    { id: 'rapeseed_mustard', name: 'Rapeseed & Mustard', rx: /rapeseed|mustard|sarson|toria/i },
-    { id: 'safflower', name: 'Safflower', rx: /safflower|kardi|kusum/i },
-    { id: 'paddy_common', name: 'Paddy (Common)', rx: /paddy.*common|dhan.*common/i },
-    { id: 'jowar_hybrid', name: 'Jowar (Hybrid)', rx: /jowar.*hybrid/i },
-    { id: 'bajra', name: 'Bajra', rx: /\bbajra\b/i },
-    { id: 'maize', name: 'Maize', rx: /\bmaize\b|\bmakka\b/i }
-  ];
-
-  const candidateRecords: ExtractedCropRecord[] = [];
-  const logs: { status: 'valid' | 'warning' | 'error'; crop_name: string; errors: string[] }[] = [];
-  const seenCropIds = new Set<string>();
-
-  // Look for rows that match crops and contain numbers
-  for (const line of lines) {
-    const lineStr = line.items.map(i => i.str).join(' ');
-
-    for (const cropDef of standardCrops) {
-      if (cropDef.rx.test(lineStr) && !seenCropIds.has(cropDef.id)) {
-        // Extract numbers in this row
-        const numberMatches = lineStr.match(/\d+(?:[,\.]\d+)?%?/g);
-        if (numberMatches && numberMatches.length >= 2) {
-          seenCropIds.add(cropDef.id);
-
-          const parsedNums = numberMatches.map(n => parseNumeric(n)).filter((n): n is number => n !== null);
-
-          // We expect: [RMS 2026-27 (prev), Cost of prod, Current MSP 2027-28, Increase, Margin %]
-          // Or: [Cost of prod, Current MSP, Increase, Margin]
-          let mspVal: number | null = null;
-          let costVal: number | null = null;
-          let marginVal: number | null = null;
-
-          if (parsedNums.length >= 5) {
-            // e.g. 2425 (prev), 1264 (cost), 2610 (current), 185 (inc), 106 (margin)
-            costVal = parsedNums[1];
-            mspVal = parsedNums[2];
-            marginVal = parsedNums[4];
-          } else if (parsedNums.length === 4) {
-            costVal = parsedNums[0];
-            mspVal = parsedNums[1];
-            marginVal = parsedNums[3];
-          } else if (parsedNums.length >= 2) {
-            mspVal = parsedNums[parsedNums.length - 1];
-            costVal = parsedNums[0];
-          }
-
-          const errors: string[] = [];
-          if (!mspVal || mspVal <= 0) {
-            errors.push('MSP must be a positive number');
-          }
-          if (costVal === null) {
-            // warning
-          }
-
-          const status = errors.length > 0 ? 'error' : 'valid';
-
-          const { cropId, cropName, aliases } = normalizeCropName(cropDef.name);
-
-          candidateRecords.push({
-            crop_id: cropId,
-            crop_name: cropName,
-            crop_aliases: aliases,
-            season,
-            marketing_year: marketingYear,
-            msp: mspVal,
-            unit: 'INR/quintal',
-            cost_of_production: costVal,
-            margin_percent: marginVal,
-            validation_status: status,
-            validation_errors: errors
-          });
-
-          logs.push({
-            status,
-            crop_name: cropName,
-            errors
-          });
-        }
-      }
-    }
-  }
-
-  // If no candidates were extracted by positional lines, fallback to table regex patterns
-  if (candidateRecords.length === 0) {
-    // Check known official sample fixture lines in fullText
-    const fixtureRows = [
-      { id: 'wheat', name: 'Wheat', msp: 2610, cost: 1264, margin: 106 },
-      { id: 'barley', name: 'Barley', msp: 2286, cost: 1447, margin: 58 },
-      { id: 'gram', name: 'Gram', msp: 5958, cost: 3751, margin: 59 },
-      { id: 'lentil_masur', name: 'Lentil (Masur)', msp: 7390, cost: 3854, margin: 92 },
-      { id: 'rapeseed_mustard', name: 'Rapeseed & Mustard', msp: 6613, cost: 3367, margin: 96 },
-      { id: 'safflower', name: 'Safflower', msp: 7215, cost: 4810, margin: 50 },
-    ];
-
-    for (const item of fixtureRows) {
-      if (new RegExp(item.name.split(' ')[0], 'i').test(fullText)) {
-        const { cropId, cropName, aliases } = normalizeCropName(item.name);
-        candidateRecords.push({
-          crop_id: cropId,
-          crop_name: cropName,
-          crop_aliases: aliases,
-          season,
-          marketing_year: marketingYear,
-          msp: item.msp,
-          unit: 'INR/quintal',
-          cost_of_production: item.cost,
-          margin_percent: item.margin,
-          validation_status: 'valid',
-          validation_errors: []
-        });
-        logs.push({
-          status: 'valid',
-          crop_name: cropName,
-          errors: []
-        });
-      }
-    }
-  }
+  const releaseId = fullText.match(/Release ID:\s*(\d+)/i)?.[1] ?? null;
+  const pibUrl = fullText.match(/https?:\/\/www\.pib\.gov\.in\/[^\s]+/i)?.[0] ?? '';
 
   const metadata: DocumentMetadata = {
     _id: docId,
     title,
     source_name: 'Press Information Bureau',
-    source_url: sourceUrl || 'https://www.pib.gov.in',
+    source_url: sourceUrl || pibUrl || 'https://www.pib.gov.in',
+    press_release_id: releaseId,
     file_name: fileName,
     season,
     marketing_year: marketingYear,

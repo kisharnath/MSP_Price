@@ -76,9 +76,15 @@ export async function upsertMspData(
 ) {
   const now = new Date();
   await ensureIndexes(db);
+  // Don't wipe previously stored highlights when a re-upload carries none
+  const { highlights, ...docFields } = doc;
+  const hasHighlights = highlights && Object.keys(highlights).length > 0;
   await db.collection<any>('msp_documents').updateOne(
     { _id: doc._id } as any,
-    { $set: { ...doc, crop_count: records.length, updated_at: now }, $setOnInsert: { created_at: now } },
+    {
+      $set: { ...docFields, ...(hasHighlights ? { highlights } : {}), crop_count: records.length, updated_at: now },
+      $setOnInsert: { created_at: now, ...(hasHighlights ? {} : { highlights: {} }) },
+    },
     { upsert: true }
   );
   for (const r of records) {
