@@ -30,7 +30,7 @@ export interface MongoSaveResponse {
 }
 
 export class MongoApiClient {
-  private static customUri: string = 'mongodb+srv://kisharnat_db_user:QCKs94TW8p0wTzUc@othermarket.neshmog.mongodb.net/?appName=OtherMarket';
+  private static customUri: string = '';
   private static customDb: string = 'agriculture_db';
 
   public static setCustomConfig(uri: string, dbName: string) {
